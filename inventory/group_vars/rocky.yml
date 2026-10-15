@@ -1,0 +1,12 @@
+---
+vm_ram: 3072
+vm_vcpus: 2
+vm_netmask: 24
+vm_dns: 1.1.1.1
+vm_gateway: 192.168.88.1
+vm_recreate: false
+vm_disk_size: "10G"
+
+pve_storage: "local"
+pve_bridge: "vmbr0"
+pve_template_id: 9002

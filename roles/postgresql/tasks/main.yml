@@ -1,0 +1,155 @@
+---
+- name: apt
+  ansible.builtin.apt:
+    name:
+      - curl
+      - ca-certificates
+      - gnupg
+    state: present
+    update_cache: true
+
+- name: keyring directory
+  ansible.builtin.file:
+    path: /usr/share/postgresql-common/pgdg
+    state: directory
+    mode: '0755'
+
+- name: apt-keyring
+  ansible.builtin.get_url:
+    url: https://www.postgresql.org/media/keys/ACCC4CF8.asc
+    dest: /etc/apt/keyrings/postgresql.gpg
+    mode: '0644'
+    force: true
+
+- name: pgdg.sources
+  ansible.builtin.copy:
+    dest: /etc/apt/sources.list.d/pgdg.sources
+    mode: '0644'
+    content: |
+      Types: deb
+      URIs: http://apt.postgresql.org/pub/repos/apt
+      Suites: trixie-pgdg
+      Components: main
+      Signed-By: /etc/apt/keyrings/postgresql.gpg
+
+- name: install postgresql
+  ansible.builtin.apt:
+    name:
+      - "postgresql-{{ pg_version }}"
+      - "postgresql-contrib-{{ pg_version }}"
+    state: present
+    update_cache: true
+
+- name: /etc/hosts
+  ansible.builtin.lineinfile:
+    path: /etc/hosts
+    line: "{{ hostvars[item]['ansible_host'] }} {{ item }}"
+    state: present
+  loop: "{{ groups['db'] }}"
+  become: true
+
+- name: conf.d
+  ansible.builtin.copy:
+    src: pg.conf
+    dest: "/etc/postgresql/{{ pg_version }}/main/conf.d/pg.conf"
+    owner: postgres
+    group: postgres
+    mode: '0644'
+
+- name: pg_hba.conf
+  ansible.builtin.lineinfile:
+    path: "/etc/postgresql/{{ pg_version }}/main/pg_hba.conf"
+    line: "host replication {{ pg_replicator_user }} {{ hostvars['deb202.realm.lan']['ansible_host'] }}/32 scram-sha-256"
+    state: present
+  when: inventory_hostname in groups['master']
+  register: postgres_hba_changed
+
+- name: master restarted
+  ansible.builtin.systemd:
+    name: postgresql
+    state: restarted
+  when: inventory_hostname in groups['master']
+
+- name: replication user
+  ansible.builtin.command:
+    cmd: psql -p 5432
+    stdin: |
+      DO $$
+      BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{{ pg_replicator_user }}') THEN
+          CREATE ROLE {{ pg_replicator_user }} WITH REPLICATION LOGIN PASSWORD '{{ pg_replicator_password }}';
+        ELSE
+          ALTER ROLE {{ pg_replicator_user }} WITH PASSWORD '{{ pg_replicator_password }}';
+        END IF;
+      END $$;
+  become: true
+  become_user: postgres
+  changed_when: false
+  when: inventory_hostname in groups['master']
+
+- name: replication slot
+  ansible.builtin.command:
+    cmd: psql -p 5432
+    stdin: |
+      DO $$
+      BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_replication_slots WHERE slot_name = 'slot_{{ item.split('.')[0] }}') THEN
+          PERFORM pg_create_physical_replication_slot('slot_{{ item.split('.')[0] }}', true);
+        END IF;
+      END $$;
+  become: true
+  become_user: postgres
+  changed_when: false
+  loop: "{{ groups['replica'] }}"
+  when: inventory_hostname in groups['master']
+
+- name: replica stopped
+  ansible.builtin.systemd:
+    name: postgresql
+    state: stopped
+  when: inventory_hostname in groups['replica']
+
+- name: data directory
+  ansible.builtin.find:
+    paths: "/var/lib/postgresql/{{ pg_version }}/main/"
+    hidden: true
+  register: pg_data_files
+  when: inventory_hostname in groups['replica']
+
+- name: delete main_old
+  ansible.builtin.file:
+    path: "/var/lib/postgresql/{{ pg_version }}/main_old"
+    state: absent
+  when:
+    - inventory_hostname in groups['replica']
+    - pg_data_files.matched is defined
+    - pg_data_files.matched > 0
+
+- name: move to main_old
+  ansible.builtin.command:
+    cmd: "mv /var/lib/postgresql/{{ pg_version }}/main /var/lib/postgresql/{{ pg_version }}/main_old"
+  when:
+    - inventory_hostname in groups['replica']
+    - pg_data_files.matched is defined
+    - pg_data_files.matched > 0
+
+- name: pg_basebackup
+  ansible.builtin.command:
+    cmd: >
+      pg_basebackup -h {{ groups['master'][0] }}
+      -U {{ pg_replicator_user }}
+      -D /var/lib/postgresql/{{ pg_version }}/main -Fp -Xs -P -R
+      --slot="slot_{{ inventory_hostname.split('.')[0] }}"
+  become: true
+  become_user: postgres
+  environment:
+    PGPASSWORD: "{{ pg_replicator_password }}"
+  when:
+    - inventory_hostname in groups['replica']
+    - pg_data_files.matched is defined
+
+- name: replica started
+  ansible.builtin.systemd:
+    name: postgresql
+    state: started
+  when: inventory_hostname in groups['replica']

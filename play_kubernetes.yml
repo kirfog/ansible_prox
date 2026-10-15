@@ -1,0 +1,236 @@
+---
+- name: install kubernetes
+  hosts: kubernetes
+  tags: install
+  become: true
+  tasks:
+    - name: sawap off
+      shell: |
+        swapoff -a
+        sed -i '/ swap / s/^\(.*\)$/#\1/g' /etc/fstab
+
+    - name: modprobe
+      modprobe:
+        name: "{{ item }}"
+        state: present
+      loop:
+        - overlay
+        - br_netfilter
+
+    - name: sysctl
+      sysctl:
+        name: "{{ item.name }}"
+        value: "{{ item.value }}"
+        state: present
+        sysctl_file: /etc/sysctl.d/k8s.conf
+      loop:
+        - { name: 'net.bridge.bridge-nf-call-iptables', value: '1' }
+        - { name: 'net.bridge.bridge-nf-call-ip6tables', value: '1' }
+        - { name: 'net.ipv4.ip_forward', value: '1' }
+
+    - name: apt
+      apt:
+        name: [apt-transport-https, ca-certificates, curl, gpg]
+        state: present
+        update_cache: true
+
+    - name: containerd
+      apt:
+        name: containerd
+        state: present
+
+    - name: systemd cgroup
+      shell: |
+        mkdir -p /etc/containerd
+        containerd config default > /etc/containerd/config.toml
+        sed -i 's/SystemdCgroup = false/SystemdCgroup = true/g' /etc/containerd/config.toml
+      notify: restart containerd
+
+    - name: apt-keyring
+      ansible.builtin.get_url:
+        url: https://pkgs.k8s.io/core:/stable:/v1.36/deb/Release.key
+        dest: /etc/apt/keyrings/kubernetes-apt-keyring.asc
+        mode: '0644'
+        force: true
+
+    - name: kubernetes.sources
+      ansible.builtin.copy:
+        dest: /etc/apt/sources.list.d/kubernetes.sources
+        mode: '0644'
+        content: |
+          Types: deb
+          URIs: https://mirror.yandex.ru/mirrors/pkgs.k8s.io/core/stable/v1.36/deb/
+          Suites: /
+          Signed-By: /etc/apt/keyrings/kubernetes-apt-keyring.asc
+
+    - name: install kubelet, kubeadm, kubectl
+      apt:
+        name: [kubelet, kubeadm, kubectl]
+        state: present
+        update_cache: true
+
+    - name: apt-mark
+      shell: apt-mark hold kubelet kubeadm kubectl
+
+  handlers:
+    - name: restart containerd
+      service:
+        name: containerd
+        state: restarted
+
+
+- name: fist master
+  hosts: "{{ groups['masters'][0] }}"
+  tags: nodes
+  become: true
+  tasks:
+    - name: kubeadm_init_check
+      ansible.builtin.stat:
+        path: /etc/kubernetes/admin.conf
+      register: kubeadm_init_check
+
+    - name: kubeadm init
+      ansible.builtin.command: >
+        kubeadm init
+        --control-plane-endpoint "{{ inventory_hostname }}:6443"
+        --pod-network-cidr=10.244.0.0/16
+        --upload-certs
+      register: init_output
+      when: not kubeadm_init_check.stat.exists
+
+    - name: /root/.kube
+      ansible.builtin.file:
+        path: /root/.kube
+        state: directory
+        mode: '0755'
+
+    - name: /root/.kube/config
+      ansible.builtin.copy:
+        src: /etc/kubernetes/admin.conf
+        dest: /root/.kube/config
+        remote_src: true
+        mode: '0600'
+
+    - name: .bashrc
+      ansible.builtin.lineinfile:
+        path: /root/.bashrc
+        line: 'export KUBECONFIG=/etc/kubernetes/admin.conf'
+        state: present
+
+    - name: kubeadm token
+      ansible.builtin.shell: kubeadm token create --print-join-command
+      register: worker_join_cmd_raw
+
+    - name: upload-certs
+      ansible.builtin.shell: kubeadm init phase upload-certs --upload-certs | tail -n 1
+      register: cert_key_raw
+
+    - name: master join
+      ansible.builtin.set_fact:
+        master_join_cmd: "{{ worker_join_cmd_raw.stdout }} --control-plane --certificate-key {{ cert_key_raw.stdout }}"
+
+    - name: worker join
+      ansible.builtin.set_fact:
+        worker_join_cmd: "{{ worker_join_cmd_raw.stdout }}"
+      delegate_to: "{{ item }}"
+      delegate_facts: true
+      loop: "{{ groups['workers'] }}"
+
+
+- name: masters
+  hosts: masters
+  tags: nodes
+  become: true
+  tasks:
+    - name: /etc/hosts
+      ansible.builtin.blockinfile:
+        path: /etc/hosts
+        marker: "# {mark} KUBERNETES CLUSTER NODES"
+        block: |
+          {% for host in groups['kubernetes'] | unique %}
+          {{ hostvars[host]['ansible_host'] }} {{ host }} {{ host | split('.') | first }}
+          {% endfor %}
+
+    - name: check admin.conf
+      ansible.builtin.stat:
+        path: /etc/kubernetes/admin.conf
+      register: node_k8s_check
+
+    - name: kubeadm join
+      ansible.builtin.shell: "{{ hostvars[groups['masters'][0]]['master_join_cmd'] }}"
+      when:
+        - inventory_hostname != groups['masters'][0]
+        - not node_k8s_check.stat.exists
+
+    - name: /root/.kube
+      ansible.builtin.file:
+        path: /root/.kube
+        state: directory
+        mode: '0755'
+      when: inventory_hostname != groups['masters'][0]
+
+    - name: /root/.kube/config
+      ansible.builtin.copy:
+        src: /etc/kubernetes/admin.conf
+        dest: /root/.kube/config
+        remote_src: true
+        mode: '0600'
+      when: inventory_hostname != groups['masters'][0]
+
+    - name: .bashrc
+      ansible.builtin.lineinfile:
+        path: /root/.bashrc
+        line: 'export KUBECONFIG=/etc/kubernetes/admin.conf'
+        state: present
+      when: inventory_hostname != groups['masters'][0]
+
+
+- name: taints-
+  hosts: "{{ groups['masters'][0] }}"
+  tags: nodes
+  become: true
+  tasks:
+    - name: workers on masters
+      ansible.builtin.shell: |
+        kubectl taint nodes {{ item }} node-role.kubernetes.io/control-plane- --kubeconfig=/etc/kubernetes/admin.conf || true
+      loop: "{{ groups['workers'] }}"
+      when: item in groups['masters']
+
+
+- name: workers
+  hosts: workers
+  tags: nodes
+  become: true
+  tasks:
+    - name: kubelet check
+      ansible.builtin.stat:
+        path: /etc/kubernetes/kubelet.conf
+      register: node_k8s_worker_check
+
+    - name: kubeadm join
+      ansible.builtin.shell: "{{ hostvars[groups['masters'][0]]['worker_join_cmd'] }}"
+      when:
+        - inventory_hostname not in groups['masters']
+        - not node_k8s_worker_check.stat.exists
+
+
+- name: flannel
+  hosts: "{{ groups['masters'][0] }}"
+  tags: flannel
+  tasks:
+    - name: kube-flannel.yml
+      ansible.builtin.get_url:
+        url: https://github.com/flannel-io/flannel/releases/latest/download/kube-flannel.yml
+        dest: /root/kube-flannel.yml
+        mode: '0644'
+
+    - name: apply flannel
+      ansible.builtin.command: kubectl apply -f /root/kube-flannel.yml --kubeconfig=/etc/kubernetes/admin.conf
+
+    - name: ready
+      ansible.builtin.shell: |
+        kubectl get nodes -o jsonpath='{.items[*].status.conditions[?(@.type=="Ready")].status}' --kubeconfig=/etc/kubernetes/admin.conf
+      register: nodes_ready
+      until: '"False" not in nodes_ready.stdout and "Unknown" not in nodes_ready.stdout'
+      retries: 30
+      delay: 10

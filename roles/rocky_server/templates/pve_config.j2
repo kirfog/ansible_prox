@@ -1,0 +1,40 @@
+#cloud-config
+disable_root: false
+allow_public_ssh_keys: true
+resize_rootfs: true
+
+
+ssh_authorized_keys:
+  - "{{ ssh_public_key_content }}"
+
+chpasswd:
+  list: |
+    root:12345
+  expire: false
+
+write_files:
+  - path: /etc/NetworkManager/system-connections/ens18.nmconnection
+    permissions: '0600'
+    content: |
+      [connection]
+      id=ens18
+      uuid={{ ansible_uuid | default(99999999 | random | to_uuid) }}
+      type=ethernet
+      interface-name=ens18
+
+      [ethernet]
+
+      [ipv4]
+      address1={{ vm_ip }}/{{ vm_netmask | default('24') }},{{ vm_gateway }}
+      dns={{ vm_dns | default('1.1.1.1') }};
+      method=manual
+
+      [ipv6]
+      # LinkLocalAddressing=no и IPv6AcceptRA=no
+      addr-gen-mode=eui64
+      method=disabled
+
+runcmd:
+  - hostnamectl set-hostname {{ vm_name }}
+  - nmcli connection load /etc/NetworkManager/system-connections/ens18.nmconnection
+  - nmcli connection up ens18

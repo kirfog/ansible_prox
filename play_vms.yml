@@ -1,0 +1,16 @@
+---
+- name: Proxmox vms
+  hosts: vms
+  gather_facts: false
+  strategy: free
+  tasks:
+    - name: vms
+      delegate_to: "{{ groups.get('hypervisor', ['localhost']) | first }}"
+      block:
+        - name: Proxmox {{ groups.get('hypervisor', ['localhost']) | first }}
+          ansible.builtin.include_role:
+            name: "{{ 'rocky_server' if 'rocky' in group_names else 'debian_server' }}"
+          vars:
+            vm_name: "{{ inventory_hostname }}"
+            vm_ip: "{{ ansible_host }}"
+            ssh_public_key_content: "{{ lookup('ansible.builtin.file', ssh_public_key_path) }}"

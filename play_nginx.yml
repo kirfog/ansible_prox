@@ -1,0 +1,18 @@
+---
+- name: Nginx
+  hosts: web
+  gather_facts: true
+  strategy: free
+  tasks:
+    - name: Debian nginx
+      ansible.builtin.apt:
+        name: nginx
+        state: present
+        update_cache: true
+      when: ansible_os_family == "Debian"
+
+    - name: Rocky nginx
+      ansible.builtin.dnf:
+        name: nginx
+        state: present
+      when: ansible_os_family == "RedHat"

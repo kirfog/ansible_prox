@@ -1,0 +1,55 @@
+---
+- name: UPDATE
+  hosts: vms
+  gather_facts: true
+  # strategy: free
+  strategy: linear
+  serial: 1
+  any_errors_fatal: true
+  tasks:
+    - name: apt update cache
+      ansible.builtin.apt:
+        update_cache: true
+      environment:
+        DEBIAN_FRONTEND: noninteractive
+      when: ansible_os_family == "Debian"
+
+    - name: dnf clear cache
+      ansible.builtin.command: dnf clean all
+      when: ansible_os_family == "RedHat"
+
+    - name: dnf update cache
+      ansible.builtin.dnf:
+        update_cache: true
+      when: ansible_os_family == "RedHat"
+
+    - name: Debian upgrade
+      ansible.builtin.apt:
+        upgrade: dist
+        update_cache: true
+      environment:
+        DEBIAN_FRONTEND: noninteractive
+      when: ansible_os_family == "Debian"
+
+    - name: Rocky upgrade
+      ansible.builtin.dnf:
+        name: "*"
+        state: latest
+        update_cache: true
+        nobest: true
+      when: ansible_os_family == "RedHat"
+
+
+- name: UPTIME
+  hosts: vms
+  gather_facts: false
+  strategy: free
+  tasks:
+    - name: get uptime
+      ansible.builtin.command: uptime
+      register: uptime_output
+      changed_when: false
+
+    - name: show uptime
+      ansible.builtin.debug:
+        msg: "{{ inventory_hostname }} {{ uptime_output.stdout }}"

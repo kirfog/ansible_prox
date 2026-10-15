@@ -1,0 +1,55 @@
+---
+- name: Proxmox | Check if target VM exists
+  ansible.builtin.command: "qm status {{ vmid }}"
+  register: pve_vm_check
+  failed_when: false
+  changed_when: false
+
+- name: Proxmox | Check vm_recreate
+  ansible.builtin.set_fact:
+    need_deploy: "{{ vm_recreate | bool or pve_vm_check.rc != 0 }}"
+
+- name: Proxmox | Destroy old VM
+  ansible.builtin.command: "{{ item }}"
+  loop:
+    - "qm stop {{ vmid }} --skiplock 1"
+    - "qm destroy {{ vmid }} --purge 1"
+  failed_when: false
+  changed_when: false
+  when: need_deploy
+
+- name: Proxmox | User-Data
+  ansible.builtin.template:
+    src: pve_config.j2
+    dest: "/var/lib/vz/snippets/{{ vm_name }}-config.yaml"
+    mode: '0644'
+  when: need_deploy
+
+- name: Proxmox | Clone VM from Template (Linked Clone)
+  ansible.builtin.command: "qm clone {{ pve_template_id }} {{ vmid }} --name {{ vm_name }} --full 0"
+  when: need_deploy
+
+- name: Proxmox | Configure Custom Resources and Cloud-Init
+  ansible.builtin.command: "{{ item }}"
+  loop:
+    - "qm set {{ vmid }} --memory {{ vm_ram }} --cores {{ vm_vcpus }}"
+    - "qm set {{ vmid }} --net0 virtio,bridge={{ pve_bridge }}"
+    - "qm set {{ vmid }} --ciuser root"
+    - "qm set {{ vmid }} --cicustom \"user=local:snippets/{{ vm_name }}-config.yaml\""
+  when: need_deploy
+
+- name: Proxmox | Resize Disk
+  ansible.builtin.command: "qm resize {{ vmid }} scsi0 {{ vm_disk_size }}"
+  when: need_deploy
+
+- name: Proxmox | Power on VM
+  ansible.builtin.command: "qm start {{ vmid }}"
+  when: need_deploy or (pve_vm_check.stdout is search('stopped'))
+
+- name: Proxmox | Check ssh availability
+  ansible.builtin.wait_for:
+    host: "{{ ansible_host }}"
+    port: 22
+    delay: 5
+    timeout: 300
+  delegate_to: localhost

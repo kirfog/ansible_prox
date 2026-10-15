@@ -1,0 +1,38 @@
+---
+- name: insatll freeipa # ansible-galaxy collection install freeipa.ansible_freeipa
+  hosts: freeipa
+  gather_facts: true
+  become: true
+
+  tasks:
+    - name: master
+      ansible.builtin.include_role:
+        name: freeipa.ansible_freeipa.ipaserver
+      when:
+        - ansible_distribution == "Rocky"
+        - inventory_hostname in groups['ipamaster']
+
+    - name: replica nameserver
+      ansible.builtin.lineinfile:
+        path: /etc/resolv.conf
+        line: "nameserver {{ hostvars[groups['ipamaster'][0]]['ansible_default_ipv4']['address'] }}"
+        insertbefore: BOF
+      when:
+        - ansible_distribution == "Rocky"
+        - inventory_hostname in groups['ipareplicas']
+
+    - name: replica
+      ansible.builtin.include_role:
+        name: freeipa.ansible_freeipa.ipareplica
+      when:
+        - ansible_distribution == "Rocky"
+        - inventory_hostname in groups['ipareplicas']
+
+    - name: replica nameserver local
+      ansible.builtin.lineinfile:
+        path: /etc/resolv.conf
+        line: "nameserver 127.0.0.1"
+        insertbefore: BOF
+      when:
+        - ansible_distribution == "Rocky"
+        - inventory_hostname in groups['ipareplicas']

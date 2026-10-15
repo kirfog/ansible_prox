@@ -1,0 +1,62 @@
+---
+- name: gnome
+  hosts: client
+  gather_facts: true
+  strategy: free
+  tasks:
+    - name: install software
+      ansible.builtin.apt:
+        name:
+          - task-gnome-desktop
+          - gdm3
+          - gnome-shell-extensions
+          - gnome-shell-extension-desktop-icons-ng
+          - gnome-shell-extension-dash-to-panel
+          - gnome-shell-extension-tiling-assistant
+        state: present
+        update_cache: true
+      environment:
+        DEBIAN_FRONTEND: noninteractive
+
+    - name: raphical target
+      ansible.builtin.command: systemctl set-default graphical.target
+      changed_when: false
+
+
+- name: users
+  hosts: client
+  become: yes
+
+  pre_tasks:
+    - name: getent
+      ansible.builtin.getent:
+        database: group
+
+  tasks:
+    - name: create or update
+      ansible.builtin.user:
+        name: "{{ item.key }}"
+        state: present
+        password: "{{ (item.value.password | string) | password_hash('sha512') }}"
+        shell: /bin/bash
+        groups: "{{ ['sudo'] if item.value.sudo | default(false) | bool else [] }}"
+        append: yes
+      loop: "{{ users | dict2items }}"
+      when: users is defined
+
+    - name: delete sudo
+      ansible.builtin.command:
+        cmd: "gpasswd -d {{ item.key }} sudo"
+      loop: "{{ users | dict2items }}"
+      when:
+        - users is defined
+        - not (item.value.sudo | default(false) | bool)
+        - ansible_facts.getent_group['sudo'] is defined
+        - item.key in (ansible_facts.getent_group['sudo'][1] | default('') | split(','))
+      failed_when: false
+      changed_when: true
+
+    - name: reboot
+      ansible.builtin.reboot:
+        reboot_timeout: 120
+        connect_timeout: 10

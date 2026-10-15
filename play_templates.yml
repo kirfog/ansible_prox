@@ -1,0 +1,38 @@
+---
+- name: Proxmox templates
+  hosts: hypervisor
+  gather_facts: false
+  tasks:
+    - name: Proxmox templates storage
+      ansible.builtin.file:
+        path: "{{ images_dir }}"
+        state: directory
+        mode: "0755"
+
+    - name: Download Debian image
+      ansible.builtin.get_url:
+        url: "{{ debian_url }}"
+        dest: "{{ images_dir }}/{{ debian_base_image }}"
+        mode: "0644"
+
+    - name: Download Rocky image
+      ansible.builtin.get_url:
+        url: "{{ rocky_url }}"
+        dest: "{{ images_dir }}/{{ rocky_base_image }}"
+        mode: "0644"
+
+    - name: Create Debian template
+      ansible.builtin.include_role:
+        name: debian_server
+        tasks_from: template.yml
+      vars:
+        pve_template_id: "{{ hostvars[groups['debian'] | first]['pve_template_id'] | default(9001) }}"
+        local_base_image: "{{ debian_base_image }}"
+
+    - name: Create Rocky template
+      ansible.builtin.include_role:
+        name: rocky_server
+        tasks_from: template.yml
+      vars:
+        pve_template_id: "{{ hostvars[groups['rocky'] | first]['pve_template_id'] | default(9002) }}"
+        local_base_image: "{{ rocky_base_image }}"

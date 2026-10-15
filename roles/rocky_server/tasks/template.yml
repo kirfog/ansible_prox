@@ -1,0 +1,33 @@
+---
+- name: Proxmox Template | Create Template VM if missing
+  ansible.builtin.command: >
+    qm config {{ pve_template_id }}
+  register: template_check
+  failed_when: false
+  changed_when: false
+
+- name: Proxmox Template | Create Template VM if missing
+  ansible.builtin.command: >
+    qm create {{ pve_template_id }} --name "roc{{ pve_template_id }}" --memory 1024 --cores 1
+    --net0 virtio,bridge={{ pve_bridge }} --scsihw virtio-scsi-pci --cpu host
+  when: template_check.rc != 0
+
+- name: Proxmox Template | Import local qcow2 disk
+  ansible.builtin.command: >
+    qm importdisk {{ pve_template_id }} "{{ images_dir }}/{{ local_base_image }}" {{ pve_storage }} --format qcow2
+  when: template_check.rc != 0
+
+- name: Proxmox Template | Configure Cloud-Init and Disk for Template
+  ansible.builtin.command: "{{ item }}"
+  loop:
+    - "qm set {{ pve_template_id }} --scsi0 {{ pve_storage }}:{{ pve_template_id }}/vm-{{ pve_template_id }}-disk-0.qcow2,discard=on,iothread=1"
+    - "qm set {{ pve_template_id }} --ide2 {{ pve_storage }}:cloudinit"
+    - "qm set {{ pve_template_id }} --boot order=scsi0"
+    - "qm set {{ pve_template_id }} --bootdisk scsi0"
+    - "qm set {{ pve_template_id }} --serial0 socket --vga serial0"
+  when: template_check.rc != 0
+  failed_when: false
+
+- name: Proxmox Template | Convert VM to permanent Template
+  ansible.builtin.command: "qm template {{ pve_template_id }}"
+  when: template_check.rc != 0
